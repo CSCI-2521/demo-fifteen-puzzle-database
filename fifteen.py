@@ -83,37 +83,47 @@ def scrambled_board(n_swaps=150):
 def fresh_game():
     st.session_state.board = scrambled_board()
     st.session_state.moves = 0
-    st.session_state.tick = 0          # bumped on every move; used for animation keys
+    st.session_state.tick = 0
     st.session_state.started = False
     st.session_state.t0 = None
     st.session_state.won = False
     st.session_state.final_time = None
-    st.session_state.anim = None       # (tile value, dx px, dy px, tick)
+    st.session_state.anim = []         # now a LIST of (value, dx, dy) — one per tile that slid
     st.session_state.score_saved = False
     st.session_state.saved_kind = None
 
 def slide(idx):
-    """Click handler: slide tile at `idx` into the blank if they're adjacent."""
+    """Click handler: any tile in the blank's row or column shoves the whole
+    run of tiles between it and the blank, one cell each, toward the blank."""
     board = st.session_state.board
     if st.session_state.won:
         return
-    if not st.session_state.started:           # timer starts on the first piece clicked
+    if not st.session_state.started:
         st.session_state.started = True
         st.session_state.t0 = time.time()
 
     blank = board.index(16)
     br, bc = divmod(blank, 4)
     r, c = divmod(idx, 4)
-    if abs(br - r) + abs(bc - c) != 1:
-        return                                 # blank isn't adjacent — nothing slides
+    dr, dc = (br > r) - (br < r), (bc > c) - (bc < c)
+    if (dr != 0) == (dc != 0):         # must share exactly one axis
+        return
 
     st.session_state.tick += 1
-    st.session_state.moves += 1
-    value = board[idx]
-    # The tile ends up where the blank was; remember its old offset so the
-    # CSS animation can start it there and slide it in.
-    st.session_state.anim = (value, (c - bc) * PITCH, (r - br) * PITCH, st.session_state.tick)
-    board[blank], board[idx] = value, 16
+    dist = abs(br - r) + abs(bc - c)   # how many tiles slide (1 = classic move)
+    st.session_state.moves += dist
+
+    # Shift tiles toward the blank, starting with the one adjacent to it.
+    anims = []
+    pr, pc = br, bc
+    for _ in range(dist):
+        tr, tc = pr - dr, pc - dc              # next tile on the way to the click
+        value = board[tr * 4 + tc]
+        board[pr * 4 + pc] = value
+        anims.append((value, (pc - tc) * PITCH, (pr - tr) * PITCH))
+        pr, pc = tr, tc
+    board[pr * 4 + pc] = 16                    # clicked tile's old spot is now blank
+    st.session_state.anim = anims
 
     if board == SOLVED:
         st.session_state.won = True
@@ -126,7 +136,8 @@ def fmt_time(seconds):
 # ---------------- rendering ----------------
 
 def render_board():
-    anim = st.session_state.anim
+    anims = st.session_state.anim
+    anim_map = {a[0]: a for a in anims}        # value -> (value, dx, dy); tile values are unique
     css = f"""
     <style>
       [class*="st-key-board"] {{
@@ -142,30 +153,33 @@ def render_board():
       }}
       [class*="st-key-blank"] button {{ visibility: hidden; }}
     """
-    if anim:
-        value, dx, dy, tick = anim
+    for value, dx, dy in anims:
+        tick = st.session_state.tick
         css += f"""
-      @keyframes slide{tick} {{
+      @keyframes slide{value}x{tick} {{
         from {{ transform: translate({dx}px, {dy}px); }}
         to   {{ transform: translate(0, 0); }}
       }}
-      [class*="st-key-t{value}x{tick}"] button {{ animation: slide{tick} {ANIM_MS}ms ease-out; }}
+      [class*="st-key-t{value}x{tick}"] button {{ animation: slide{value}x{tick} {ANIM_MS}ms ease-out; }}
         """
     css += "</style>"
     st.markdown(css, unsafe_allow_html=True)
 
+    tick = st.session_state.tick
     with st.container(key="board"):
         for idx, value in enumerate(st.session_state.board):
             if value == 16:
                 st.button(" ", key=f"blank{idx}", disabled=True)
-            elif anim and anim[0] == value:
-                if st.button(str(value), key=f"t{value}x{anim[3]}", disabled=st.session_state.won):
+            elif value in anim_map:
+                # Fresh keys this move -> buttons remount -> all slides animate together
+                if st.button(str(value), key=f"t{value}x{tick}", disabled=st.session_state.won):
                     slide(idx)
                     st.rerun()
             else:
                 if st.button(str(value), key=f"t{value}", disabled=st.session_state.won):
                     slide(idx)
                     st.rerun()
+
 
 def render_status():
     if st.session_state.won:
