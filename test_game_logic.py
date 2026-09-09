@@ -1,6 +1,6 @@
 import unittest
 
-from game_logic import is_solvable, move_tile, solved_board
+from game_logic import is_solvable, move_tile, scrambled_board, solved_board
 
 
 class GameLogicTests(unittest.TestCase):
@@ -22,6 +22,12 @@ class GameLogicTests(unittest.TestCase):
         self.assertTrue(is_solvable(solved_board(3), 3))
         self.assertTrue(is_solvable(solved_board(4), 4))
         self.assertFalse(is_solvable([2, 1, 3, 4, 5, 6, 7, 8, 9], 3))
+
+    def test_scramble_never_returns_the_solved_board(self):
+        for size in (2, 3, 4):
+            for _ in range(20):
+                board = scrambled_board(size)
+                self.assertNotEqual(board, solved_board(size))
 
 
 if __name__ == "__main__":
