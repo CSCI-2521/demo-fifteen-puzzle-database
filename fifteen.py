@@ -1,5 +1,5 @@
 """
-fifteen.py — 15-puzzle with a Supabase leaderboard (CSCI 2521 reference app)
+fifteen.py — sliding puzzles with a Supabase leaderboard (CSCI 2521 reference app)
 
 Setup:
   pip install streamlit supabase
@@ -9,6 +9,7 @@ Setup:
      create table if not exists leaderboard (
        id         bigint generated always as identity primary key,
        name       text    not null,
+       puzzle_size text    not null check (puzzle_size in ('3', '8', '15')),
        seconds    double precision not null,
        moves      int     not null default 0,
        created_at timestamptz not null default now()
@@ -27,12 +28,11 @@ Setup:
 """
 
 import os
-import random
 import time
 
 import streamlit as st
 from supabase import create_client
-import os
+from game_logic import move_tile, scrambled_board, solved_board
 
 SUPABASE_URL = "https://dtqcritroplivlizslbk.supabase.co"
 
@@ -41,7 +41,11 @@ GAP = 8              # gap between tiles in px
 PITCH = CELL + GAP   # distance between neighboring tiles — used by the animation
 ANIM_MS = 150        # slide duration
 
-SOLVED = list(range(1, 17))   # 1..15 in order, 16 stands in for the blank
+PUZZLES = {
+    3: ("3-Puzzle (2×2)", 2),
+    8: ("8-Puzzle (3×3)", 3),
+    15: ("15-Puzzle (4×4)", 4),
+}
 
 # ---------------- persistence ----------------
 
@@ -53,79 +57,44 @@ def db():
         st.stop()
     return create_client(SUPABASE_URL, key)
 
-# ---------------- game logic ----------------
-
-def is_solvable(board):
-    """Classic 15-puzzle criterion: inversions + blank's row from the bottom is odd."""
-    tiles = [v for v in board if v != 16]
-    inversions = sum(
-        1
-        for i in range(len(tiles))
-        for j in range(i + 1, len(tiles))
-        if tiles[i] > tiles[j]
-    )
-    row_from_bottom = 4 - board.index(16) // 4   # bottom row = 1
-    return (inversions + row_from_bottom) % 2 == 1
-
-def scrambled_board(n_swaps=150):
-    """Start from the solved board and swap random pairs (blank counts as a
-    piece) an even number of times. Even swaps alone do NOT guarantee a
-    solvable puzzle — the blank's row matters too — so we rescramble until
-    the parity check passes (about two tries on average)."""
-    while True:
-        board = SOLVED.copy()
-        for _ in range(n_swaps):                  # even number of pair swaps
-            i, j = random.sample(range(16), 2)
-            board[i], board[j] = board[j], board[i]
-        if is_solvable(board):
-            return board
-
 def fresh_game():
-    st.session_state.board = scrambled_board()
+    puzzle_size = st.session_state.puzzle_size
+    dimension = PUZZLES[puzzle_size][1]
+    st.session_state.board = scrambled_board(dimension)
     st.session_state.moves = 0
     st.session_state.tick = 0
     st.session_state.started = False
     st.session_state.t0 = None
     st.session_state.won = False
     st.session_state.final_time = None
-    st.session_state.anim = []         # now a LIST of (value, dx, dy) — one per tile that slid
+    st.session_state.anim = None       # (value, dx, dy, tick) for the tile that slid
     st.session_state.score_saved = False
     st.session_state.saved_kind = None
 
 def slide(idx):
-    """Click handler: any tile in the blank's row or column shoves the whole
-    run of tiles between it and the blank, one cell each, toward the blank."""
+    """Click handler: move an adjacent tile into the blank."""
     board = st.session_state.board
+    puzzle_size = st.session_state.puzzle_size
+    dimension = PUZZLES[puzzle_size][1]
     if st.session_state.won:
         return
     if not st.session_state.started:
         st.session_state.started = True
         st.session_state.t0 = time.time()
 
-    blank = board.index(16)
-    br, bc = divmod(blank, 4)
-    r, c = divmod(idx, 4)
-    dr, dc = (br > r) - (br < r), (bc > c) - (bc < c)
-    if (dr != 0) == (dc != 0):         # must share exactly one axis
+    blank = board.index(dimension * dimension)
+    br, bc = divmod(blank, dimension)
+    r, c = divmod(idx, dimension)
+    if abs(br - r) + abs(bc - c) != 1:
         return
 
     st.session_state.tick += 1
-    dist = abs(br - r) + abs(bc - c)   # how many tiles slide (1 = classic move)
-    st.session_state.moves += dist
+    st.session_state.moves += 1
+    value = board[idx]
+    board[:] = move_tile(board, idx, dimension)
+    st.session_state.anim = (value, (c - bc) * PITCH, (r - br) * PITCH, st.session_state.tick)
 
-    # Shift tiles toward the blank, starting with the one adjacent to it.
-    anims = []
-    pr, pc = br, bc
-    for _ in range(dist):
-        tr, tc = pr - dr, pc - dc              # next tile on the way to the click
-        value = board[tr * 4 + tc]
-        board[pr * 4 + pc] = value
-        anims.append((value, (pc - tc) * PITCH, (pr - tr) * PITCH))
-        pr, pc = tr, tc
-    board[pr * 4 + pc] = 16                    # clicked tile's old spot is now blank
-    st.session_state.anim = anims
-
-    if board == SOLVED:
+    if board == solved_board(dimension):
         st.session_state.won = True
         st.session_state.final_time = time.time() - st.session_state.t0
 
@@ -136,13 +105,14 @@ def fmt_time(seconds):
 # ---------------- rendering ----------------
 
 def render_board():
-    anims = st.session_state.anim
-    anim_map = {a[0]: a for a in anims}        # value -> (value, dx, dy); tile values are unique
+    anim = st.session_state.anim
+    puzzle_size = st.session_state.puzzle_size
+    dimension = PUZZLES[puzzle_size][1]
     css = f"""
     <style>
       [class*="st-key-board"] {{
         display: grid;
-        grid-template-columns: repeat(4, {CELL}px);
+        grid-template-columns: repeat({dimension}, {CELL}px);
         gap: {GAP}px;
         justify-content: center;
       }}
@@ -153,14 +123,14 @@ def render_board():
       }}
       [class*="st-key-blank"] button {{ visibility: hidden; }}
     """
-    for value, dx, dy in anims:
-        tick = st.session_state.tick
+    if anim:
+        value, dx, dy, tick = anim
         css += f"""
-      @keyframes slide{value}x{tick} {{
+      @keyframes slide{tick} {{
         from {{ transform: translate({dx}px, {dy}px); }}
         to   {{ transform: translate(0, 0); }}
       }}
-      [class*="st-key-t{value}x{tick}"] button {{ animation: slide{value}x{tick} {ANIM_MS}ms ease-out; }}
+      [class*="st-key-t{puzzle_size}x{value}x{tick}"] button {{ animation: slide{tick} {ANIM_MS}ms ease-out; }}
         """
     css += "</style>"
     st.markdown(css, unsafe_allow_html=True)
@@ -168,15 +138,14 @@ def render_board():
     tick = st.session_state.tick
     with st.container(key="board"):
         for idx, value in enumerate(st.session_state.board):
-            if value == 16:
-                st.button(" ", key=f"blank{idx}", disabled=True)
-            elif value in anim_map:
-                # Fresh keys this move -> buttons remount -> all slides animate together
-                if st.button(str(value), key=f"t{value}x{tick}", disabled=st.session_state.won):
+            if value == dimension * dimension:
+                st.button(" ", key=f"blank{puzzle_size}x{idx}", disabled=True)
+            elif anim and value == anim[0]:
+                if st.button(str(value), key=f"t{puzzle_size}x{value}x{tick}", disabled=st.session_state.won):
                     slide(idx)
                     st.rerun()
             else:
-                if st.button(str(value), key=f"t{value}", disabled=st.session_state.won):
+                if st.button(str(value), key=f"t{puzzle_size}x{value}", disabled=st.session_state.won):
                     slide(idx)
                     st.rerun()
 
@@ -203,6 +172,7 @@ def render_save_score():
             try:
                 db().table("leaderboard").insert({
                     "name": name.strip(),
+                    "puzzle_size": str(st.session_state.puzzle_size),
                     "seconds": round(st.session_state.final_time, 3),
                     "moves": st.session_state.moves,
                 }).execute()
@@ -220,11 +190,13 @@ def render_save_score():
         st.rerun()
 
 def render_leaderboard():
-    st.subheader("🏆 Fastest solves")
+    puzzle_size = st.session_state.puzzle_size
+    st.subheader(f"🏆 Fastest {PUZZLES[puzzle_size][0]} solves")
     try:
         rows = (
             db().table("leaderboard")
             .select("name, seconds, moves")
+            .eq("puzzle_size", str(puzzle_size))
             .order("seconds")
             .limit(10)
             .execute()
@@ -247,8 +219,19 @@ def render_leaderboard():
 # ---------------- app ----------------
 
 st.set_page_config(page_title="15 Puzzle", page_icon="🧩")
-st.title("🧩 15-Puzzle")
-st.caption("Slide a tile into the empty spot. Order the tiles 1–15, fastest time wins.")
+st.title("🧩 Sliding Puzzle")
+st.caption("Slide adjacent tiles into the empty spot. Order the tiles, fastest time wins.")
+
+if "puzzle_size" not in st.session_state:
+    st.session_state.puzzle_size = 15
+
+st.selectbox(
+    "Puzzle size",
+    options=list(PUZZLES),
+    format_func=lambda value: PUZZLES[value][0],
+    key="puzzle_size",
+    on_change=fresh_game,
+)
 
 if "board" not in st.session_state:
     fresh_game()
